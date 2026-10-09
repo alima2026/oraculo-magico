@@ -1,0 +1,5 @@
+streamlit
+anthropic
+pyswisseph
+fpdf2
+tzdata
