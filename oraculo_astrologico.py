@@ -4,6 +4,9 @@ import os
 import re
 import io
 import hmac
+import json
+import secrets
+import threading
 import html
 import urllib.parse
 import datetime
@@ -13,6 +16,7 @@ import streamlit as st
 import swisseph as swe
 from fpdf import FPDF
 import anthropic
+import requests
 
 # ============================================================
 # STREAMLIT: SIEMPRE PRIMERO
@@ -51,6 +55,14 @@ WHATSAPP_VENTAS = cfg("WHATSAPP_VENTAS", "")      # ej: 59899123456 (sin + ni es
 PRECIO_PREMIUM = cfg("PRECIO_PREMIUM", "USD 5")
 ACCESS_CODES = [c.strip().upper() for c in cfg("ACCESS_CODES", "").split(",") if c.strip()]
 PREGUNTAS_GRATIS = int(cfg("PREGUNTAS_GRATIS", "1") or 1)
+USOS_POR_CODIGO = int(cfg("USOS_POR_CODIGO", "4") or 4)   # consultas premium por cada código vendido
+ADMIN_CLAVE = cfg("ADMIN_CLAVE")                           # clave del panel privado (?admin=1)
+UPSTASH_URL = cfg("UPSTASH_REDIS_REST_URL").rstrip("/")     # base de datos para contar los usos
+UPSTASH_TOKEN = cfg("UPSTASH_REDIS_REST_TOKEN")
+# Mercado Pago automático (Checkout Pro). Si no hay token, se usa PAYMENT_LINK como antes.
+MP_ACCESS_TOKEN = cfg("MP_ACCESS_TOKEN")
+PRECIO_MONTO = float(cfg("PRECIO_MONTO", "200") or 200)
+PRECIO_MONEDA = cfg("PRECIO_MONEDA", "UYU")
 
 # ============================================================
 # DATA
@@ -364,13 +376,241 @@ def whatsapp_link(texto: str, numero: str = "") -> str:
 # ============================================================
 # PREMIUM
 # ============================================================
-def codigo_valido(codigo: str) -> bool:
-    codigo = codigo.strip().upper()
-    return any(hmac.compare_digest(codigo, c) for c in ACCESS_CODES)
+class Almacen:
+    """Guarda cuántas consultas le quedan a cada código.
+    - Con Upstash (nube): los usos se mantienen siempre, aunque la app se reinicie.
+    - Sin Upstash: se guardan en codigos.json (sirve en tu PC; en la nube se pierde al reiniciar)."""
+
+    PREFIJO = "oraculo:codigo:"
+
+    def __init__(self):
+        self.nube = bool(UPSTASH_URL and UPSTASH_TOKEN)
+        self.archivo = os.path.join(os.path.dirname(os.path.abspath(__file__)), "codigos.json")
+        self.lock = threading.Lock()
+
+    # --- Upstash (Redis por HTTP)
+    def _redis(self, *cmd):
+        r = requests.post(UPSTASH_URL, json=list(cmd),
+                          headers={"Authorization": f"Bearer {UPSTASH_TOKEN}"}, timeout=10)
+        r.raise_for_status()
+        return r.json().get("result")
+
+    # --- archivo local
+    def _leer(self) -> dict:
+        try:
+            with open(self.archivo, encoding="utf-8") as f:
+                return json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {}
+
+    def _guardar(self, datos: dict):
+        with open(self.archivo, "w", encoding="utf-8") as f:
+            json.dump(datos, f, indent=1)
+
+    # --- operaciones
+    def restantes(self, codigo: str):
+        if self.nube:
+            v = self._redis("GET", self.PREFIJO + codigo)
+            return None if v is None else int(v)
+        with self.lock:
+            v = self._leer().get(codigo)
+        return None if v is None else int(v)
+
+    def crear(self, codigo: str, usos: int, solo_si_no_existe: bool = False):
+        if self.nube:
+            if solo_si_no_existe:
+                self._redis("SET", self.PREFIJO + codigo, usos, "NX")
+            else:
+                self._redis("SET", self.PREFIJO + codigo, usos)
+            return
+        with self.lock:
+            d = self._leer()
+            if not (solo_si_no_existe and codigo in d):
+                d[codigo] = usos
+                self._guardar(d)
+
+    def consumir(self, codigo: str):
+        """Descuenta 1 uso. Devuelve los que quedan, o None si no tenía."""
+        if self.nube:
+            n = int(self._redis("DECR", self.PREFIJO + codigo))
+            if n < 0:
+                self._redis("INCR", self.PREFIJO + codigo)
+                return None
+            return n
+        with self.lock:
+            d = self._leer()
+            if d.get(codigo, 0) <= 0:
+                return None
+            d[codigo] -= 1
+            self._guardar(d)
+            return d[codigo]
+
+    def devolver(self, codigo: str):
+        if self.nube:
+            self._redis("INCR", self.PREFIJO + codigo)
+            return
+        with self.lock:
+            d = self._leer()
+            d[codigo] = d.get(codigo, 0) + 1
+            self._guardar(d)
+
+    def email(self, codigo: str):
+        if self.nube:
+            return self._redis("GET", "oraculo:email:" + codigo)
+        with self.lock:
+            return self._leer().get("__emails__", {}).get(codigo)
+
+    def guardar_email(self, codigo: str, email: str):
+        if self.nube:
+            self._redis("SET", "oraculo:email:" + codigo, email)
+            return
+        with self.lock:
+            d = self._leer()
+            d.setdefault("__emails__", {})[codigo] = email
+            self._guardar(d)
+
+    def codigo_de_pago(self, pago_id: str):
+        if self.nube:
+            return self._redis("GET", "oraculo:pago:" + pago_id)
+        with self.lock:
+            return self._leer().get("__pagos__", {}).get(pago_id)
+
+    def reservar_pago(self, pago_id: str, codigo: str) -> str:
+        """Asocia el pago a un código una sola vez. Devuelve el código que quedó asociado."""
+        if self.nube:
+            ok = self._redis("SET", "oraculo:pago:" + pago_id, codigo, "NX")
+            return codigo if ok else self._redis("GET", "oraculo:pago:" + pago_id)
+        with self.lock:
+            d = self._leer()
+            pagos = d.setdefault("__pagos__", {})
+            if pago_id not in pagos:
+                pagos[pago_id] = codigo
+                self._guardar(d)
+            return pagos[pago_id]
+
+    def listar(self) -> dict:
+        if self.nube:
+            claves = self._redis("KEYS", self.PREFIJO + "*") or []
+            if not claves:
+                return {}
+            valores = self._redis("MGET", *claves)
+            return {k[len(self.PREFIJO):]: int(v or 0) for k, v in zip(claves, valores)}
+        with self.lock:
+            return {k: v for k, v in self._leer().items() if not k.startswith("__")}
+
+
+@st.cache_resource
+def almacen() -> Almacen:
+    a = Almacen()
+    # Los códigos de ACCESS_CODES se cargan una sola vez con USOS_POR_CODIGO usos
+    for c in ACCESS_CODES:
+        try:
+            a.crear(c, USOS_POR_CODIGO, solo_si_no_existe=True)
+        except Exception:
+            pass
+    return a
+
+
+def nuevo_codigo() -> str:
+    alfabeto = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # sin 0/O ni 1/I para no confundir
+    return "ORA-" + "".join(secrets.choice(alfabeto) for _ in range(6))
 
 
 def es_premium() -> bool:
-    return st.session_state.get("premium", False)
+    return bool(st.session_state.get("codigo")) and st.session_state.get("creditos", 0) > 0
+
+
+def usar_credito() -> bool:
+    """Descuenta 1 consulta premium del código activo."""
+    codigo = st.session_state.get("codigo")
+    if not codigo:
+        return False
+    try:
+        quedan = almacen().consumir(codigo)
+    except Exception:
+        st.error("No pudimos verificar tu código en este momento. Probá de nuevo en un minuto.")
+        return False
+    if quedan is None:
+        st.session_state["creditos"] = 0
+        return False
+    st.session_state["creditos"] = quedan
+    return True
+
+
+def devolver_credito():
+    codigo = st.session_state.get("codigo")
+    if codigo:
+        try:
+            almacen().devolver(codigo)
+            st.session_state["creditos"] = st.session_state.get("creditos", 0) + 1
+        except Exception:
+            pass
+
+
+# ============================================================
+# MERCADO PAGO (cobro automático → código automático)
+# ============================================================
+MP_API = "https://api.mercadopago.com"
+
+
+def mp_crear_cobro(email: str = "") -> str:
+    """Crea el cobro y devuelve el link de pago de Mercado Pago."""
+    r = requests.post(
+        f"{MP_API}/checkout/preferences",
+        headers={"Authorization": f"Bearer {MP_ACCESS_TOKEN}"},
+        json={
+            "items": [{
+                "title": f"{APP_NAME} - Pack de {USOS_POR_CODIGO} consultas premium",
+                "quantity": 1,
+                "unit_price": PRECIO_MONTO,
+                "currency_id": PRECIO_MONEDA,
+            }],
+            **({"payer": {"email": email}} if email else {}),
+            "external_reference": email or "web",
+            "back_urls": {"success": APP_PUBLIC_LINK, "pending": APP_PUBLIC_LINK, "failure": APP_PUBLIC_LINK},
+            "auto_return": "approved",
+            "statement_descriptor": "ORACULO",
+        },
+        timeout=15,
+    )
+    r.raise_for_status()
+    return r.json()["init_point"]
+
+
+def mp_canjear_pago(pago_id: str):
+    """Verifica el pago con Mercado Pago y devuelve (codigo, creditos, mensaje_error)."""
+    pago_id = re.sub(r"\D", "", str(pago_id))
+    if not pago_id:
+        return None, 0, "Número de operación inválido."
+    alm = almacen()
+    ya = alm.codigo_de_pago(pago_id)
+    if ya:
+        return ya, alm.restantes(ya) or 0, None
+    r = requests.get(f"{MP_API}/v1/payments/{pago_id}",
+                     headers={"Authorization": f"Bearer {MP_ACCESS_TOKEN}"}, timeout=15)
+    if r.status_code == 404:
+        return None, 0, "No encontramos ese pago. Revisá el número de operación."
+    r.raise_for_status()
+    pago = r.json()
+    if pago.get("status") != "approved":
+        return None, 0, "El pago todavía no está aprobado. Si pagaste en efectivo, puede demorar unas horas."
+    if float(pago.get("transaction_amount") or 0) + 0.01 < PRECIO_MONTO or pago.get("currency_id") != PRECIO_MONEDA:
+        return None, 0, "El monto de ese pago no corresponde al pack premium."
+    codigo = alm.reservar_pago(pago_id, nuevo_codigo())
+    if alm.restantes(codigo) is None:          # recién creado: le cargamos las consultas
+        alm.crear(codigo, USOS_POR_CODIGO)
+        ref = (pago.get("external_reference") or "").strip().lower()
+        email = ref if "@" in ref else ((pago.get("payer") or {}).get("email") or "").strip().lower()
+        if "@" in email:
+            alm.guardar_email(codigo, email)
+    return codigo, alm.restantes(codigo) or 0, None
+
+
+def activar_codigo(codigo: str, creditos: int):
+    st.session_state["codigo"] = codigo
+    st.session_state["creditos"] = creditos
+    st.session_state["codigo_nuevo"] = codigo
+    st.session_state["regenerar"] = True
 
 
 def bloque_premium(motivo: str):
@@ -382,32 +622,75 @@ def bloque_premium(motivo: str):
 <h3>Oráculo Premium</h3>
 <p style="color:var(--suave)">{html.escape(motivo)}</p>
 <div class="precio">{html.escape(PRECIO_PREMIUM)}</div>
-<div class="unico">pago único · acceso inmediato</div>
+<div class="unico">pack de {USOS_POR_CODIGO} consultas premium · acceso inmediato</div>
 <ul>
 <li>Lectura <b>completa</b> de tu carta: esencia, amor, dinero, trabajo y desafíos</li>
-<li><b>Preguntas ilimitadas</b> a tu oráculo personal</li>
-<li><b>PDF</b> de tu carta para guardar o regalar</li>
+<li>Preguntas <b>profundas</b> a tu oráculo personal</li>
+<li>Usalas como quieras: tu carta, la de tu pareja, la de un amigo…</li>
+<li><b>PDF</b> de cada carta para guardar o regalar</li>
 </ul></div>""",
             unsafe_allow_html=True,
         )
-        col1, col2 = st.columns(2)
-        if PAYMENT_LINK:
-            col1.link_button("✨ Quiero mi lectura completa", PAYMENT_LINK, type="primary",
-                             use_container_width=True)
+        clave = motivo[:10]
+        link_pago = PAYMENT_LINK
+        if MP_ACCESS_TOKEN:
+            # Un cobro por visitante: el botón lleva directo a Mercado Pago y, al volver, el código aparece solo
+            if not st.session_state.get("link_pago_mp"):
+                try:
+                    st.session_state["link_pago_mp"] = mp_crear_cobro()
+                except Exception:
+                    st.session_state["link_pago_mp"] = ""
+            link_pago = st.session_state["link_pago_mp"] or PAYMENT_LINK
+        if link_pago:
+            st.link_button("✨ Quiero mi lectura completa", link_pago, type="primary", width="stretch")
+            if MP_ACCESS_TOKEN:
+                st.caption("Pagás en Mercado Pago y al volver tu código aparece automáticamente.")
+
         if WHATSAPP_VENTAS:
-            col2.link_button("💬 Comprar por WhatsApp",
-                             whatsapp_link("Hola! Quiero el Oráculo Premium 🔮", WHATSAPP_VENTAS),
-                             use_container_width=True)
-        st.caption("Después del pago recibís un código de acceso.")
+            st.link_button("💬 Prefiero comprar por WhatsApp",
+                           whatsapp_link("Hola! Quiero el Oráculo Premium 🔮", WHATSAPP_VENTAS),
+                           width="stretch")
+        if not MP_ACCESS_TOKEN:
+            st.caption(f"Después del pago recibís un código personal con {USOS_POR_CODIGO} consultas.")
         with st.form(f"form_codigo_{motivo[:10]}"):
-            codigo = st.text_input("¿Ya tenés tu código?", type="password")
+            codigo = st.text_input("¿Ya tenés tu código?", placeholder="ORA-XXXXXX")
+            email = st.text_input("Tu email (el que usaste al comprar)", placeholder="nombre@correo.com")
             if st.form_submit_button("Activar"):
-                if codigo_valido(codigo):
-                    st.session_state["premium"] = True
-                    st.session_state["regenerar"] = True
-                    st.rerun()
-                else:
+                codigo = codigo.strip().upper()
+                email = email.strip().lower()
+                email_ok = True
+                try:
+                    quedan = almacen().restantes(codigo) if codigo else None
+                    dueño = almacen().email(codigo) if quedan is not None else None
+                    email_ok = (not dueño) or hmac.compare_digest(dueño, email)
+                except Exception:
+                    quedan = None
+                    st.error("No pudimos verificar el código ahora. Probá de nuevo en un minuto.")
+                if quedan is None:
                     st.error("Código inválido.")
+                elif not email_ok:
+                    st.error("Este código pertenece a otra persona. Escribí el mismo email con el que compraste.")
+                elif quedan <= 0:
+                    st.error("Este código ya usó todas sus consultas. Podés comprar un pack nuevo.")
+                else:
+                    activar_codigo(codigo, quedan)
+                    st.session_state["codigo_nuevo"] = ""
+                    st.rerun()
+        if MP_ACCESS_TOKEN:
+            with st.expander("¿Pagaste y no te apareció el código?"):
+                with st.form(f"form_recuperar_{clave}"):
+                    op = st.text_input("Número de operación de Mercado Pago",
+                                       help="Lo encontrás en el comprobante o en el email de Mercado Pago.")
+                    if st.form_submit_button("Recuperar mi código"):
+                        try:
+                            cod, cred, err = mp_canjear_pago(op)
+                        except Exception:
+                            cod, cred, err = None, 0, "No pudimos verificar el pago ahora. Probá en un minuto."
+                        if err:
+                            st.error(err)
+                        else:
+                            activar_codigo(cod, cred)
+                            st.rerun()
 
 
 # ============================================================
@@ -546,9 +829,89 @@ def separador():
 # ============================================================
 st.markdown(CSS, unsafe_allow_html=True)
 
+# ============================================================
+# PANEL PRIVADO (entrar con  https://tu-app.streamlit.app/?admin=1 )
+# ============================================================
+if st.query_params.get("admin") == "1":
+    seccion("ADMIN", "Panel de códigos", "Solo para vos. Generá un código cada vez que alguien te paga.")
+    if not ADMIN_CLAVE:
+        st.error("Falta configurar ADMIN_CLAVE en los Secrets.")
+        st.stop()
+    if not st.session_state.get("admin_ok"):
+        with st.form("login_admin"):
+            clave = st.text_input("Clave de administrador", type="password")
+            if st.form_submit_button("Entrar", type="primary"):
+                if hmac.compare_digest(clave, ADMIN_CLAVE):
+                    st.session_state["admin_ok"] = True
+                    st.rerun()
+                else:
+                    st.error("Clave incorrecta.")
+        st.stop()
+
+    alm = almacen()
+    if not alm.nube:
+        st.warning("Base de datos no configurada (Upstash). Los usos se guardan en un archivo local: "
+                   "en Streamlit Cloud se pierden si la app se reinicia.")
+
+    with st.container(border=True):
+        usos = st.number_input("Consultas del código", min_value=1, max_value=50, value=USOS_POR_CODIGO)
+        cliente = st.text_input("Nombre del cliente (opcional)")
+        email_cli = st.text_input("Email del cliente (si lo ponés, el código solo funciona con ese email)")
+        if st.button("✨ Generar código nuevo", type="primary", width="stretch"):
+            cod = nuevo_codigo()
+            alm.crear(cod, int(usos))
+            if email_cli.strip():
+                alm.guardar_email(cod, email_cli.strip().lower())
+            st.session_state["ultimo_codigo"] = (cod, int(usos), cliente.strip(), email_cli.strip().lower())
+
+    if st.session_state.get("ultimo_codigo"):
+        cod, usos_cod, cliente, email_cli = st.session_state["ultimo_codigo"]
+        st.success(f"Código creado: **{cod}** ({usos_cod} consultas)")
+        mensaje = (f"¡Gracias por tu compra{', ' + cliente if cliente else ''}! 🔮\n\n"
+                   f"Tu código del Oráculo Premium es: *{cod}*\n"
+                   f"Tenés {usos_cod} consultas (lectura completa de carta o preguntas al oráculo).\n\n"
+                   f"Entrá a {APP_PUBLIC_LINK} y escribilo donde dice \"¿Ya tenés tu código?\""
+                   + (f" junto con tu email ({email_cli})." if email_cli else "."))
+        st.code(mensaje, language=None)
+        st.link_button("💬 Enviar por WhatsApp", whatsapp_link(mensaje))
+
+    if MP_ACCESS_TOKEN:
+        with st.container(border=True):
+            st.markdown("#### 💬 Link de pago para mandar por WhatsApp")
+            st.caption("Cuando el cliente paga con este link, vuelve a la app y su código aparece solo.")
+            mail_wa = st.text_input("Email del cliente", key="mail_wa")
+            if st.button("Crear link de pago", width="stretch"):
+                if "@" not in mail_wa:
+                    st.error("Escribí el email del cliente.")
+                else:
+                    try:
+                        link = mp_crear_cobro(mail_wa.strip().lower())
+                        msg = (f"¡Hola! 🔮 Este es tu link para el Oráculo Premium ({PRECIO_PREMIUM}, "
+                               f"{USOS_POR_CODIGO} consultas):\n{link}\n\n"
+                               "Cuando termines de pagar, volvés a la app y tu código aparece automáticamente.")
+                        st.code(msg, language=None)
+                        st.link_button("💬 Abrir WhatsApp con este mensaje", whatsapp_link(msg))
+                    except Exception:
+                        st.error("No se pudo crear el link. Revisá MP_ACCESS_TOKEN.")
+
+    with st.expander("Ver todos los códigos y sus consultas restantes"):
+        try:
+            todos = alm.listar()
+        except Exception as e:
+            todos = {}
+            st.error(f"No se pudo leer la base de datos: {e}")
+        if todos:
+            st.dataframe(
+                [{"Código": k, "Consultas restantes": v} for k, v in sorted(todos.items())],
+                width="stretch", hide_index=True,
+            )
+        else:
+            st.write("Todavía no hay códigos.")
+    st.stop()
+
 defaults = {
     "carta": None, "oraculo_respuesta": "", "share_text": "", "respuesta_rapida": "",
-    "tema_rapido": "plata", "premium": False, "preguntas_usadas": 0, "regenerar": False,
+    "tema_rapido": "plata", "codigo": "", "creditos": 0, "preguntas_usadas": 0, "regenerar": False,
 }
 for k, v in defaults.items():
     st.session_state.setdefault(k, v)
@@ -566,8 +929,29 @@ amor, dinero, trabajo y decisiones.</p>
     unsafe_allow_html=True,
 )
 
-if es_premium():
-    st.success("👑 Modo Premium activo — disfrutá tu lectura completa")
+# Vuelta desde Mercado Pago: ?payment_id=...&status=approved
+_pago_id = st.query_params.get("payment_id") or st.query_params.get("collection_id")
+if MP_ACCESS_TOKEN and _pago_id and _pago_id != "null":
+    try:
+        _cod, _cred, _err = mp_canjear_pago(_pago_id)
+    except Exception:
+        _cod, _cred, _err = None, 0, "No pudimos verificar tu pago todavía. Usá “¿Pagaste y no te apareció el código?”."
+    st.query_params.clear()
+    if _err:
+        st.warning(_err)
+    else:
+        activar_codigo(_cod, _cred)
+
+if st.session_state.get("codigo_nuevo"):
+    with st.container(border=True):
+        st.markdown(
+            f"""<div class="premium"><div class="corona">🎉</div><h3>¡Pago confirmado!</h3>
+<p>Tu código personal es</p><div class="precio">{html.escape(st.session_state['codigo_nuevo'])}</div>
+<div class="unico">Guardalo (sacale captura): lo vas a necesitar si volvés otro día.</div></div>""",
+            unsafe_allow_html=True,
+        )
+
+aviso_premium = st.empty()   # se completa al final, con el saldo ya actualizado
 
 if not AI_OK:
     st.warning("El oráculo está en mantenimiento. Podés calcular tu carta igual; la interpretación vuelve en breve.")
@@ -580,7 +964,7 @@ seccion("GRATIS", "Mensaje del día", "Elegí lo que te está pesando hoy y reci
 with st.container(border=True):
     tema = st.selectbox("¿Qué tema te está pesando hoy?", TEMAS_RAPIDOS,
                         index=TEMAS_RAPIDOS.index(st.session_state["tema_rapido"]))
-    if st.button("✨ Recibir mi mensaje", use_container_width=True):
+    if st.button("✨ Recibir mi mensaje", width="stretch"):
         st.session_state["tema_rapido"] = tema
         try:
             with st.spinner("Consultando a los astros..."):
@@ -612,15 +996,18 @@ with st.form("datos_usuario"):
     hora = col2.time_input("Hora de nacimiento", value=datetime.time(12, 0), step=60)
     idx = st.selectbox("¿Dónde naciste?", options=list(range(len(labels))),
                        format_func=lambda i: labels[i], index=idx_mvd)
-    submitted = st.form_submit_button("🔮 Revelar mi carta", type="primary", use_container_width=True)
+    submitted = st.form_submit_button("🔮 Revelar mi carta", type="primary", width="stretch")
 
 
 def generar_interpretacion(carta: dict):
+    completa = es_premium() and usar_credito()   # la lectura completa usa 1 consulta
     try:
         with st.spinner("Interpretando tu carta..."):
-            carta["interpretacion"] = interpretar_carta(carta["calc"], carta["nombre"], completa=es_premium())
-            carta["interpretacion_completa"] = es_premium()
+            carta["interpretacion"] = interpretar_carta(carta["calc"], carta["nombre"], completa=completa)
+            carta["interpretacion_completa"] = completa
     except ErrorIA as e:
+        if completa:
+            devolver_credito()
         carta["interpretacion"] = ""
         st.error(f"La carta se calculó bien, pero la interpretación falló: {e}")
 
@@ -679,22 +1066,29 @@ if carta:
         with st.container(border=True):
             st.markdown(carta["interpretacion"])
 
-    if not es_premium():
-        bloque_premium("Esto es solo un adelanto. Accedé a tu lectura completa.")
-    else:
+    if carta.get("interpretacion_completa"):
         st.download_button(
             "📜 Descargar mi carta en PDF",
             data=exportar_pdf(carta),
             file_name=f"Carta_Natal_{carta['nombre'].replace(' ', '_')}.pdf",
             mime="application/pdf",
         )
+    elif es_premium():
+        if st.button(f"👑 Ver la lectura completa de esta carta (usa 1 de tus {st.session_state['creditos']} consultas)",
+                     type="primary", width="stretch"):
+            generar_interpretacion(carta)
+            st.rerun()
+    else:
+        bloque_premium("Esto es solo un adelanto. Accedé a tu lectura completa.")
 
     separador()
 
     # ORÁCULO
     seccion("PASO 2", "Preguntale a tu oráculo", "Amor, plata, trabajo, una decisión… lo que necesites.")
     restantes = max(0, PREGUNTAS_GRATIS - st.session_state["preguntas_usadas"])
-    if not es_premium():
+    if es_premium():
+        st.caption("Cada pregunta usa 1 de tus consultas premium.")
+    else:
         st.caption(f"Te queda{'' if restantes == 1 else 'n'} {restantes} pregunta{'' if restantes == 1 else 's'} gratis")
 
     puede_preguntar = es_premium() or restantes > 0
@@ -702,21 +1096,27 @@ if carta:
         with st.form("form_oraculo"):
             pregunta = st.text_area("Escribí tu pregunta", placeholder="Ej: ¿Es buen momento para cambiar de trabajo?",
                                     height=110, max_chars=500)
-            ask = st.form_submit_button("🔮 Consultar al oráculo", type="primary", use_container_width=True)
+            ask = st.form_submit_button("🔮 Consultar al oráculo", type="primary", width="stretch")
 
         if ask:
             if not pregunta.strip():
                 st.warning("Escribí tu pregunta.")
             else:
+                premium = es_premium()
+                if premium and not usar_credito():
+                    st.warning("Tu código ya no tiene consultas disponibles.")
+                    st.stop()
                 try:
                     with st.spinner("El oráculo está leyendo tu carta..."):
                         resp = responder_oraculo(pregunta.strip(), c, carta["nombre"])
                     st.session_state["oraculo_respuesta"] = resp
                     st.session_state["share_text"] = build_share_text(pregunta.strip(), resp)
-                    if not es_premium():
+                    if not premium:
                         st.session_state["preguntas_usadas"] += 1
                     st.rerun()
                 except ErrorIA as e:
+                    if premium:
+                        devolver_credito()
                     st.error(str(e))
 
     if st.session_state["oraculo_respuesta"]:
@@ -726,7 +1126,13 @@ if carta:
         st.link_button("💬 Compartir por WhatsApp", whatsapp_link(st.session_state["share_text"]))
 
     if not puede_preguntar:
-        bloque_premium("Usaste tu pregunta gratis. Seguí consultando sin límite.")
+        bloque_premium("Usaste tu pregunta gratis. Seguí consultando con un pack premium.")
+
+if es_premium():
+    n = st.session_state["creditos"]
+    aviso_premium.success(f"👑 Premium activo · te queda{'' if n == 1 else 'n'} {n} consulta{'' if n == 1 else 's'}")
+elif st.session_state.get("codigo"):
+    aviso_premium.info("👑 Usaste todas las consultas de tu código. ¡Gracias! Podés comprar un pack nuevo cuando quieras.")
 
 st.markdown(
     f"""<div class="pie">✦ ✧ ✦<br>{APP_NAME}<br>
