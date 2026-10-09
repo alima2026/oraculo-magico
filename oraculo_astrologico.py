@@ -383,15 +383,16 @@ class Almacen:
 
     PREFIJO = "oraculo:codigo:"
 
-    def __init__(self):
-        self.nube = bool(UPSTASH_URL and UPSTASH_TOKEN)
+    def __init__(self, url: str = "", token: str = ""):
+        self.url, self.token = url, token
+        self.nube = bool(url and token)
         self.archivo = os.path.join(os.path.dirname(os.path.abspath(__file__)), "codigos.json")
         self.lock = threading.Lock()
 
     # --- Upstash (Redis por HTTP)
     def _redis(self, *cmd):
-        r = requests.post(UPSTASH_URL, json=list(cmd),
-                          headers={"Authorization": f"Bearer {UPSTASH_TOKEN}"}, timeout=10)
+        r = requests.post(self.url, json=list(cmd),
+                          headers={"Authorization": f"Bearer {self.token}"}, timeout=10)
         r.raise_for_status()
         return r.json().get("result")
 
@@ -500,8 +501,8 @@ class Almacen:
 
 
 @st.cache_resource
-def almacen() -> Almacen:
-    a = Almacen()
+def _almacen(url: str, token: str) -> Almacen:
+    a = Almacen(url, token)
     # Los códigos de ACCESS_CODES se cargan una sola vez con USOS_POR_CODIGO usos
     for c in ACCESS_CODES:
         try:
@@ -509,6 +510,11 @@ def almacen() -> Almacen:
         except Exception:
             pass
     return a
+
+
+def almacen() -> Almacen:
+    # Se vuelve a crear solo si cambian las claves en Secrets
+    return _almacen(UPSTASH_URL, UPSTASH_TOKEN)
 
 
 def nuevo_codigo() -> str:
@@ -590,6 +596,8 @@ def mp_canjear_pago(pago_id: str):
                      headers={"Authorization": f"Bearer {MP_ACCESS_TOKEN}"}, timeout=15)
     if r.status_code == 404:
         return None, 0, "No encontramos ese pago. Revisá el número de operación."
+    if r.status_code in (401, 403):
+        return None, 0, "No pudimos consultar el pago (configuración de Mercado Pago). Avisanos por WhatsApp."
     r.raise_for_status()
     pago = r.json()
     if pago.get("status") != "approved":
@@ -847,6 +855,49 @@ if st.query_params.get("admin") == "1":
                 else:
                     st.error("Clave incorrecta.")
         st.stop()
+
+    with st.expander("🩺 Diagnóstico de conexiones", expanded=True):
+        # Claude
+        st.write("**Claude (IA):**", "✅ clave cargada" if AI_OK else "❌ falta ANTHROPIC_API_KEY")
+        # Upstash
+        if not (UPSTASH_URL and UPSTASH_TOKEN):
+            st.write("**Base de datos (Upstash):** ❌ faltan UPSTASH_REDIS_REST_URL / TOKEN")
+        elif "redis" in UPSTASH_TOKEN or "@" in UPSTASH_TOKEN or " " in UPSTASH_TOKEN:
+            st.write("**Base de datos (Upstash):** ❌ el TOKEN pegado es el comando `redis-cli`. "
+                     "Hay que pegar solo el *Token* de la sección REST / Token.")
+        else:
+            try:
+                r = requests.post(UPSTASH_URL, json=["PING"],
+                                  headers={"Authorization": f"Bearer {UPSTASH_TOKEN}"}, timeout=10)
+                if r.status_code == 200:
+                    st.write("**Base de datos (Upstash):** ✅ conectada")
+                else:
+                    st.write(f"**Base de datos (Upstash):** ❌ error {r.status_code}: {r.text[:120]}")
+            except Exception as e:
+                st.write(f"**Base de datos (Upstash):** ❌ sin conexión ({type(e).__name__})")
+        # Mercado Pago
+        if not MP_ACCESS_TOKEN:
+            st.write("**Mercado Pago:** ⚠️ sin MP_ACCESS_TOKEN (se usa el link fijo)")
+        elif re.fullmatch(r"APP_USR-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", MP_ACCESS_TOKEN):
+            st.write("**Mercado Pago:** ❌ pegaste la *Public Key*. Hace falta el *Access Token* "
+                     "(más largo, con números: APP_USR-1234567890123456-...).")
+        else:
+            try:
+                r = requests.get(f"{MP_API}/users/me",
+                                 headers={"Authorization": f"Bearer {MP_ACCESS_TOKEN}"}, timeout=10)
+                if r.status_code == 200:
+                    u = r.json()
+                    st.write(f"**Mercado Pago:** ✅ conectado a la cuenta {u.get('nickname', '')} "
+                             f"({u.get('email', '')}) · país {u.get('site_id', '')}")
+                    try:
+                        mp_crear_cobro()
+                        st.write("**Crear cobro:** ✅ funciona")
+                    except requests.HTTPError as e:
+                        st.write(f"**Crear cobro:** ❌ {e.response.status_code}: {e.response.text[:200]}")
+                else:
+                    st.write(f"**Mercado Pago:** ❌ error {r.status_code}: {r.text[:160]}")
+            except Exception as e:
+                st.write(f"**Mercado Pago:** ❌ sin conexión ({type(e).__name__})")
 
     alm = almacen()
     if not alm.nube:
