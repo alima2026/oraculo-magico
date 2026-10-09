@@ -4,6 +4,7 @@ import os
 import re
 import io
 import hmac
+import html
 import urllib.parse
 import datetime
 from zoneinfo import ZoneInfo
@@ -42,7 +43,7 @@ client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY) if AI_OK else None
 # Haiku 5.5 "piensa" antes de responder y eso consume del límite: dejamos margen amplio
 # (solo se paga lo que realmente usa) y le pedimos poco esfuerzo de razonamiento.
 LIMITE_TOKENS = 16000
-ESFUERZO = cfg("CLAUDE_EFFORT", "low")
+ESFUERZO = cfg("ORACULO_ESFUERZO", "low")
 
 # Monetización
 PAYMENT_LINK = cfg("PAYMENT_LINK", "")            # ej: link de Mercado Pago / Stripe
@@ -375,16 +376,24 @@ def es_premium() -> bool:
 def bloque_premium(motivo: str):
     """Caja de venta + campo para activar código."""
     with st.container(border=True):
-        st.markdown(f"### 🌟 Desbloqueá el Oráculo Premium ({PRECIO_PREMIUM})")
-        st.write(motivo)
         st.markdown(
-            "- Interpretación **completa** de tu carta (amor, dinero, trabajo, desafíos)\n"
-            "- **Preguntas ilimitadas** al oráculo\n"
-            "- **PDF** de tu carta para guardar o regalar"
+            f"""<div class="premium">
+<div class="corona">👑</div>
+<h3>Oráculo Premium</h3>
+<p style="color:var(--suave)">{html.escape(motivo)}</p>
+<div class="precio">{html.escape(PRECIO_PREMIUM)}</div>
+<div class="unico">pago único · acceso inmediato</div>
+<ul>
+<li>Lectura <b>completa</b> de tu carta: esencia, amor, dinero, trabajo y desafíos</li>
+<li><b>Preguntas ilimitadas</b> a tu oráculo personal</li>
+<li><b>PDF</b> de tu carta para guardar o regalar</li>
+</ul></div>""",
+            unsafe_allow_html=True,
         )
         col1, col2 = st.columns(2)
         if PAYMENT_LINK:
-            col1.link_button("💳 Pagar ahora", PAYMENT_LINK, use_container_width=True)
+            col1.link_button("✨ Quiero mi lectura completa", PAYMENT_LINK, type="primary",
+                             use_container_width=True)
         if WHATSAPP_VENTAS:
             col2.link_button("💬 Comprar por WhatsApp",
                              whatsapp_link("Hola! Quiero el Oráculo Premium 🔮", WHATSAPP_VENTAS),
@@ -402,8 +411,141 @@ def bloque_premium(motivo: str):
 
 
 # ============================================================
+# DISEÑO (místico oscuro: noche estrellada, violeta y dorado)
+# ============================================================
+GLIFOS = {k: v + "\ufe0e" for k, v in {
+    "Aries": "♈", "Tauro": "♉", "Géminis": "♊", "Cáncer": "♋", "Leo": "♌", "Virgo": "♍",
+    "Libra": "♎", "Escorpio": "♏", "Sagitario": "♐", "Capricornio": "♑", "Acuario": "♒", "Piscis": "♓"}.items()}
+
+CSS = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@500;700&family=Inter:wght@400;500;600&display=swap');
+
+:root{
+  --noche:#0b0820; --noche2:#151033; --panel:rgba(30,22,68,.72); --borde:rgba(212,175,95,.28);
+  --oro:#e3c27a; --oro2:#b8913f; --lila:#b9a6ff; --texto:#ece8ff; --suave:#a9a3c9;
+}
+
+/* Fondo: noche con estrellas */
+.stApp{
+  background:
+    radial-gradient(1px 1px at 12% 18%, #fff 50%, transparent 51%),
+    radial-gradient(1px 1px at 78% 12%, #fff 50%, transparent 51%),
+    radial-gradient(1.5px 1.5px at 40% 66%, #f6e7c1 50%, transparent 51%),
+    radial-gradient(1px 1px at 88% 52%, #fff 50%, transparent 51%),
+    radial-gradient(1px 1px at 22% 84%, #fff 50%, transparent 51%),
+    radial-gradient(1.5px 1.5px at 62% 30%, #fff 50%, transparent 51%),
+    radial-gradient(1px 1px at 6% 48%, #d9ccff 50%, transparent 51%),
+    radial-gradient(1px 1px at 95% 88%, #fff 50%, transparent 51%),
+    radial-gradient(900px 600px at 50% -10%, rgba(124,92,255,.28), transparent 70%),
+    radial-gradient(700px 500px at 100% 100%, rgba(227,194,122,.10), transparent 70%),
+    linear-gradient(180deg, var(--noche) 0%, var(--noche2) 100%) !important;
+  background-attachment: fixed !important;
+  color: var(--texto);
+}
+html, body, .stApp, p, li, label, span, div{ font-family:'Inter',sans-serif; }
+.stApp p, .stApp li, .stApp label, .stMarkdown, [data-testid="stCaptionContainer"]{ color:var(--texto) !important; }
+[data-testid="stCaptionContainer"] p{ color:var(--suave) !important; }
+h1,h2,h3,h4{ font-family:'Cinzel',serif !important; color:var(--oro) !important; letter-spacing:.5px; }
+
+/* Ocultar marca y menús de Streamlit */
+header[data-testid="stHeader"]{ background:transparent !important; }
+[data-testid="stToolbar"], [data-testid="stDecoration"], #MainMenu, footer,
+[data-testid="stStatusWidget"]{ display:none !important; visibility:hidden !important; }
+.block-container{ padding-top:2rem !important; max-width:760px; }
+
+/* Portada */
+.hero{ text-align:center; padding:2.2rem 1rem 1.2rem; }
+.hero .bola{ font-size:64px; filter:drop-shadow(0 0 24px rgba(185,166,255,.7)); }
+.hero h1{ font-size:2.6rem; margin:.3rem 0 .2rem; line-height:1.15;
+  background:linear-gradient(90deg,#f7e3ad,#e3c27a,#b9a6ff); -webkit-background-clip:text; background-clip:text;
+  -webkit-text-fill-color:transparent; }
+.hero .tag{ font-family:'Cinzel',serif; color:var(--lila); font-size:1.05rem; letter-spacing:2px; text-transform:uppercase; }
+.hero .sub{ color:var(--suave); max-width:520px; margin:.8rem auto 0; font-size:1rem; }
+.chips{ display:flex; gap:.5rem; justify-content:center; flex-wrap:wrap; margin-top:1.2rem; }
+.chip{ border:1px solid var(--borde); background:rgba(255,255,255,.04); color:var(--texto);
+  padding:.35rem .8rem; border-radius:999px; font-size:.82rem; }
+
+/* Títulos de sección */
+.seccion{ text-align:center; margin:2.2rem 0 .8rem; }
+.seccion .num{ display:inline-block; color:var(--oro); border:1px solid var(--borde); border-radius:999px;
+  font-size:.75rem; padding:.15rem .7rem; letter-spacing:2px; }
+.seccion h2{ margin:.5rem 0 .2rem; font-size:1.6rem; }
+.seccion p{ color:var(--suave) !important; margin:0; }
+.separador{ text-align:center; color:var(--oro2); letter-spacing:12px; margin:1.8rem 0; opacity:.8; }
+
+/* Paneles: formularios y contenedores con borde */
+[data-testid="stForm"], [data-testid="stVerticalBlockBorderWrapper"]{
+  background:var(--panel) !important; border:1px solid var(--borde) !important; border-radius:18px !important;
+  box-shadow:0 10px 40px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.04); backdrop-filter:blur(6px);
+}
+
+/* Botones */
+.stButton button, .stFormSubmitButton button, .stLinkButton a, .stDownloadButton button{
+  border-radius:999px !important; border:1px solid var(--oro2) !important; background:transparent !important;
+  color:var(--oro) !important; font-weight:600 !important; padding:.55rem 1.4rem !important; transition:all .2s;
+}
+.stButton button:hover, .stFormSubmitButton button:hover, .stLinkButton a:hover, .stDownloadButton button:hover{
+  background:rgba(227,194,122,.12) !important; box-shadow:0 0 18px rgba(227,194,122,.25);
+}
+.stFormSubmitButton button[kind="primaryFormSubmit"], .stButton button[kind="primary"], .stLinkButton a[kind="primary"]{
+  background:linear-gradient(90deg,#e3c27a,#c79a45) !important; color:#1a1233 !important; border:none !important;
+  box-shadow:0 6px 24px rgba(227,194,122,.35);
+}
+.stButton button p, .stFormSubmitButton button p, .stLinkButton a p, .stDownloadButton button p{ color:inherit !important; }
+
+/* Avisos */
+[data-testid="stAlert"]{ background:rgba(185,166,255,.08) !important; border:1px solid rgba(185,166,255,.3) !important;
+  border-radius:14px !important; }
+[data-testid="stAlert"] *{ color:var(--texto) !important; }
+
+/* Lectura */
+.lectura{ background:rgba(255,255,255,.03); border-left:3px solid var(--oro); border-radius:12px; padding:1rem 1.2rem; }
+
+/* Tarjetas Sol / Luna / Ascendente */
+.trio{ display:grid; grid-template-columns:repeat(3,1fr); gap:.8rem; margin:1rem 0 1.4rem; }
+.astro{ text-align:center; background:var(--panel); border:1px solid var(--borde); border-radius:16px; padding:1rem .5rem; }
+.astro .g{ font-size:2.1rem; color:var(--oro); line-height:1; }
+.astro .t{ font-size:.72rem; letter-spacing:2px; text-transform:uppercase; color:var(--suave); margin-top:.5rem; }
+.astro .s{ font-family:'Cinzel',serif; font-size:1.15rem; color:var(--texto); margin-top:.15rem; }
+
+/* Tarjeta Premium */
+.premium{ text-align:center; padding:.4rem .2rem 0; }
+.premium .corona{ font-size:2rem; }
+.premium h3{ margin:.2rem 0; }
+.premium .precio{ font-family:'Cinzel',serif; font-size:2.4rem; color:var(--oro); margin:.3rem 0 0; }
+.premium .unico{ color:var(--suave); font-size:.85rem; margin-bottom:.9rem; }
+.premium ul{ list-style:none; padding:0; margin:0 auto 1rem; max-width:420px; text-align:left; }
+.premium li{ padding:.35rem 0; border-bottom:1px dashed rgba(212,175,95,.18); }
+.premium li:before{ content:"✦  "; color:var(--oro); }
+
+.pie{ text-align:center; color:var(--suave); font-size:.8rem; margin:2.5rem 0 1rem; line-height:1.6; }
+
+@media (max-width:640px){
+  .hero h1{ font-size:2rem; } .hero .bola{ font-size:52px; }
+  .astro .s{ font-size:.95rem; } .astro .g{ font-size:1.7rem; }
+}
+</style>
+"""
+
+
+def seccion(numero: str, titulo: str, sub: str = ""):
+    st.markdown(
+        f'<div class="seccion"><span class="num">{numero}</span><h2>{titulo}</h2>'
+        + (f"<p>{sub}</p>" if sub else "") + "</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def separador():
+    st.markdown('<div class="separador">✦ ✧ ✦</div>', unsafe_allow_html=True)
+
+
+# ============================================================
 # UI
 # ============================================================
+st.markdown(CSS, unsafe_allow_html=True)
+
 defaults = {
     "carta": None, "oraculo_respuesta": "", "share_text": "", "respuesta_rapida": "",
     "tema_rapido": "plata", "premium": False, "preguntas_usadas": 0, "regenerar": False,
@@ -411,41 +553,51 @@ defaults = {
 for k, v in defaults.items():
     st.session_state.setdefault(k, v)
 
-st.title("🔮 Oráculo Astrológico")
-st.write("Calculá tu carta natal con precisión astronómica y preguntale lo que quieras a tu oráculo.")
+st.markdown(
+    """<div class="hero">
+<div class="bola">🔮</div>
+<div class="tag">Las estrellas tienen algo para decirte</div>
+<h1>Oráculo Astrológico</h1>
+<p class="sub">Tu carta natal calculada con precisión astronómica e interpretada para tu vida real:
+amor, dinero, trabajo y decisiones.</p>
+<div class="chips"><span class="chip">✦ Cálculo astronómico exacto</span>
+<span class="chip">✦ Lectura personalizada</span><span class="chip">✦ Resultado en segundos</span></div>
+</div>""",
+    unsafe_allow_html=True,
+)
 
 if es_premium():
-    st.success("🌟 Modo Premium activo")
+    st.success("👑 Modo Premium activo — disfrutá tu lectura completa")
 
 if not AI_OK:
-    st.warning("⚠️ Falta configurar ANTHROPIC_API_KEY. La carta se calcula igual, pero sin interpretación.")
+    st.warning("El oráculo está en mantenimiento. Podés calcular tu carta igual; la interpretación vuelve en breve.")
 
 # -------------------------------
 # PREGUNTA RÁPIDA (gancho gratis)
 # -------------------------------
-st.markdown("### ⚡ Pregunta rápida")
-st.caption("Probalo en 10 segundos. Después hacé tu carta completa.")
+seccion("GRATIS", "Mensaje del día", "Elegí lo que te está pesando hoy y recibí un consejo en segundos.")
 
-tema = st.selectbox("¿Qué tema te está pesando hoy?", TEMAS_RAPIDOS,
-                    index=TEMAS_RAPIDOS.index(st.session_state["tema_rapido"]))
-if st.button("Responder rápido"):
-    st.session_state["tema_rapido"] = tema
-    try:
-        with st.spinner("Consultando a los astros..."):
-            st.session_state["respuesta_rapida"] = oraculo_rapido(tema, datetime.date.today().isoformat())
-    except ErrorIA as e:
-        st.session_state["respuesta_rapida"] = ""
-        st.error(str(e))
+with st.container(border=True):
+    tema = st.selectbox("¿Qué tema te está pesando hoy?", TEMAS_RAPIDOS,
+                        index=TEMAS_RAPIDOS.index(st.session_state["tema_rapido"]))
+    if st.button("✨ Recibir mi mensaje", use_container_width=True):
+        st.session_state["tema_rapido"] = tema
+        try:
+            with st.spinner("Consultando a los astros..."):
+                st.session_state["respuesta_rapida"] = oraculo_rapido(tema, datetime.date.today().isoformat())
+        except ErrorIA as e:
+            st.session_state["respuesta_rapida"] = ""
+            st.error(str(e))
 
-if st.session_state["respuesta_rapida"]:
-    st.info(st.session_state["respuesta_rapida"])
+    if st.session_state["respuesta_rapida"]:
+        st.markdown(st.session_state["respuesta_rapida"])
 
-st.markdown("---")
+separador()
 
 # -------------------------------
 # FORM CARTA NATAL
 # -------------------------------
-st.markdown("## 📌 Tu carta natal")
+seccion("PASO 1", "Tu carta natal", "Con tu fecha, hora y lugar de nacimiento.")
 
 city_country_options = sorted(CIUDADES.keys(), key=lambda x: (x[1], x[0]))
 labels = [f"{c}, {p}" for c, p in city_country_options]
@@ -460,7 +612,7 @@ with st.form("datos_usuario"):
     hora = col2.time_input("Hora de nacimiento", value=datetime.time(12, 0), step=60)
     idx = st.selectbox("¿Dónde naciste?", options=list(range(len(labels))),
                        format_func=lambda i: labels[i], index=idx_mvd)
-    submitted = st.form_submit_button("Consultar carta", type="primary")
+    submitted = st.form_submit_button("🔮 Revelar mi carta", type="primary", use_container_width=True)
 
 
 def generar_interpretacion(carta: dict):
@@ -512,42 +664,45 @@ if carta and st.session_state["regenerar"]:
 # -------------------------------
 if carta:
     c = carta["calc"]
-    st.subheader(f"Carta natal de {carta['nombre']}")
-    st.write(f"**Nacimiento:** {carta['fecha']} {carta['hora']} · {carta['ciudad']}, {carta['pais']}")
-
-    m1, m2, m3 = st.columns(3)
-    m1.metric("☀️ Sol", c["planetas"]["Sol"]["signo"])
-    m2.metric("🌙 Luna", c["planetas"]["Luna"]["signo"])
-    m3.metric("⬆️ Ascendente", c["asc_signo"])
+    st.markdown(
+        f"""<div class="seccion"><h2>Carta de {html.escape(carta['nombre'])}</h2>
+<p>{carta['fecha']} · {carta['hora']} · {html.escape(carta['ciudad'])}, {html.escape(carta['pais'])}</p></div>
+<div class="trio">
+<div class="astro"><div class="g">{GLIFOS[c['planetas']['Sol']['signo']]}</div><div class="t">Sol</div><div class="s">{c['planetas']['Sol']['signo']}</div></div>
+<div class="astro"><div class="g">{GLIFOS[c['planetas']['Luna']['signo']]}</div><div class="t">Luna</div><div class="s">{c['planetas']['Luna']['signo']}</div></div>
+<div class="astro"><div class="g">{GLIFOS[c['asc_signo']]}</div><div class="t">Ascendente</div><div class="s">{c['asc_signo']}</div></div>
+</div>""",
+        unsafe_allow_html=True,
+    )
 
     if carta["interpretacion"]:
-        st.markdown("### Interpretación")
-        st.write(carta["interpretacion"])
+        with st.container(border=True):
+            st.markdown(carta["interpretacion"])
 
     if not es_premium():
         bloque_premium("Esto es solo un adelanto. Accedé a tu lectura completa.")
     else:
         st.download_button(
-            "📄 Descargar PDF de mi carta",
+            "📜 Descargar mi carta en PDF",
             data=exportar_pdf(carta),
             file_name=f"Carta_Natal_{carta['nombre'].replace(' ', '_')}.pdf",
             mime="application/pdf",
         )
 
-    st.divider()
+    separador()
 
     # ORÁCULO
-    st.markdown("## 💬 Preguntale algo a tu oráculo")
+    seccion("PASO 2", "Preguntale a tu oráculo", "Amor, plata, trabajo, una decisión… lo que necesites.")
     restantes = max(0, PREGUNTAS_GRATIS - st.session_state["preguntas_usadas"])
     if not es_premium():
-        st.caption(f"Preguntas gratis restantes: {restantes}")
+        st.caption(f"Te queda{'' if restantes == 1 else 'n'} {restantes} pregunta{'' if restantes == 1 else 's'} gratis")
 
     puede_preguntar = es_premium() or restantes > 0
     if puede_preguntar:
         with st.form("form_oraculo"):
             pregunta = st.text_area("Escribí tu pregunta", placeholder="Ej: ¿Es buen momento para cambiar de trabajo?",
                                     height=110, max_chars=500)
-            ask = st.form_submit_button("Consultar Oráculo", type="primary")
+            ask = st.form_submit_button("🔮 Consultar al oráculo", type="primary", use_container_width=True)
 
         if ask:
             if not pregunta.strip():
@@ -565,13 +720,17 @@ if carta:
                     st.error(str(e))
 
     if st.session_state["oraculo_respuesta"]:
-        st.success("Respuesta del oráculo:")
-        st.write(st.session_state["oraculo_respuesta"])
+        with st.container(border=True):
+            st.markdown("#### ✦ El oráculo responde")
+            st.markdown(st.session_state["oraculo_respuesta"])
         st.link_button("💬 Compartir por WhatsApp", whatsapp_link(st.session_state["share_text"]))
 
     if not puede_preguntar:
         bloque_premium("Usaste tu pregunta gratis. Seguí consultando sin límite.")
 
-st.divider()
-st.caption("Orientación simbólica/psicológica. No sustituye asesoramiento profesional.")
-st.caption("App creada por Carlos Changala & IA")
+st.markdown(
+    f"""<div class="pie">✦ ✧ ✦<br>{APP_NAME}<br>
+Orientación simbólica y de autoconocimiento. No sustituye asesoramiento profesional.<br>
+App creada por Carlos Changala &amp; IA</div>""",
+    unsafe_allow_html=True,
+)
