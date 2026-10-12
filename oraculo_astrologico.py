@@ -385,12 +385,22 @@ class Almacen:
 
     def __init__(self, url: str = "", token: str = ""):
         self.url, self.token = url, token
-        self.nube = bool(url and token)
+        self.cliente = None
+        # Si en el token pegaron el comando "redis-cli ... redis://default:CLAVE@host:6379",
+        # nos conectamos directo por protocolo Redis (con TLS).
+        m = re.search(r"rediss?://\S+", token or "")
+        if m:
+            import redis
+            dsn = m.group(0).replace("redis://", "rediss://", 1)
+            self.cliente = redis.from_url(dsn, decode_responses=True, socket_timeout=10)
+        self.nube = bool(self.cliente or (url and token))
         self.archivo = os.path.join(os.path.dirname(os.path.abspath(__file__)), "codigos.json")
         self.lock = threading.Lock()
 
     # --- Upstash (Redis por HTTP)
     def _redis(self, *cmd):
+        if self.cliente is not None:
+            return self.cliente.execute_command(*cmd)
         r = requests.post(self.url, json=list(cmd),
                           headers={"Authorization": f"Bearer {self.token}"}, timeout=10)
         r.raise_for_status()
@@ -860,21 +870,14 @@ if st.query_params.get("admin") == "1":
         # Claude
         st.write("**Claude (IA):**", "✅ clave cargada" if AI_OK else "❌ falta ANTHROPIC_API_KEY")
         # Upstash
-        if not (UPSTASH_URL and UPSTASH_TOKEN):
-            st.write("**Base de datos (Upstash):** ❌ faltan UPSTASH_REDIS_REST_URL / TOKEN")
-        elif "redis" in UPSTASH_TOKEN or "@" in UPSTASH_TOKEN or " " in UPSTASH_TOKEN:
-            st.write("**Base de datos (Upstash):** ❌ el TOKEN pegado es el comando `redis-cli`. "
-                     "Hay que pegar solo el *Token* de la sección REST / Token.")
+        if not UPSTASH_TOKEN:
+            st.write("**Base de datos (Upstash):** ❌ falta UPSTASH_REDIS_REST_TOKEN")
         else:
             try:
-                r = requests.post(UPSTASH_URL, json=["PING"],
-                                  headers={"Authorization": f"Bearer {UPSTASH_TOKEN}"}, timeout=10)
-                if r.status_code == 200:
-                    st.write("**Base de datos (Upstash):** ✅ conectada")
-                else:
-                    st.write(f"**Base de datos (Upstash):** ❌ error {r.status_code}: {r.text[:120]}")
+                almacen()._redis("PING")
+                st.write("**Base de datos (Upstash):** ✅ conectada")
             except Exception as e:
-                st.write(f"**Base de datos (Upstash):** ❌ sin conexión ({type(e).__name__})")
+                st.write(f"**Base de datos (Upstash):** ❌ no conecta ({type(e).__name__}). Revisá el token.")
         # Mercado Pago
         if not MP_ACCESS_TOKEN:
             st.write("**Mercado Pago:** ⚠️ sin MP_ACCESS_TOKEN (se usa el link fijo)")
@@ -1040,11 +1043,20 @@ idx_mvd = city_country_options.index(("Montevideo", "Uruguay"))
 
 with st.form("datos_usuario"):
     nombre = st.text_input("¿Cuál es tu nombre?")
-    col1, col2 = st.columns(2)
-    fecha = col1.date_input("Fecha de nacimiento", value=datetime.date(1990, 1, 1),
-                            min_value=datetime.date(1900, 1, 1), max_value=datetime.date.today(),
-                            format="DD/MM/YYYY")
-    hora = col2.time_input("Hora de nacimiento", value=datetime.time(12, 0), step=60)
+    st.markdown("**Fecha de nacimiento**")
+    hoy = datetime.date.today()
+    MESES = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto",
+             "Septiembre", "Octubre", "Noviembre", "Diciembre"]
+    cd, cm, ca = st.columns([1, 1.6, 1.2])
+    dia = cd.selectbox("Día", list(range(1, 32)), index=None, placeholder="Día")
+    mes = cm.selectbox("Mes", list(range(1, 13)), format_func=lambda m: MESES[m - 1],
+                       index=None, placeholder="Mes")
+    anio = ca.selectbox("Año", list(range(hoy.year, 1899, -1)), index=None, placeholder="Año")
+    st.markdown("**Hora de nacimiento** (si no la sabés, dejá 12:00)")
+    ch, cmin = st.columns(2)
+    hh = ch.selectbox("Hora", list(range(24)), index=12, format_func=lambda h: f"{h:02d} h")
+    mm = cmin.selectbox("Minutos", list(range(60)), index=0, format_func=lambda m: f"{m:02d} min")
+    hora = datetime.time(hh, mm)
     idx = st.selectbox("¿Dónde naciste?", options=list(range(len(labels))),
                        format_func=lambda i: labels[i], index=idx_mvd)
     submitted = st.form_submit_button("🔮 Revelar mi carta", type="primary", width="stretch")
@@ -1064,8 +1076,20 @@ def generar_interpretacion(carta: dict):
 
 
 if submitted:
+    fecha = None
+    if dia and mes and anio:
+        try:
+            fecha = datetime.date(anio, mes, dia)
+        except ValueError:
+            fecha = None
     if not nombre.strip():
         st.error("Poné tu nombre.")
+    elif not (dia and mes and anio):
+        st.error("Elegí día, mes y año de nacimiento.")
+    elif fecha is None:
+        st.error("Esa fecha no existe (revisá el día y el mes).")
+    elif fecha > datetime.date.today():
+        st.error("La fecha de nacimiento no puede ser futura.")
     else:
         ciudad, pais = city_country_options[idx]
         info = CIUDADES[(ciudad, pais)]
